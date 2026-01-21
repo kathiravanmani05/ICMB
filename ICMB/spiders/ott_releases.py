@@ -1,4 +1,8 @@
-import scrapy,json
+import scrapy
+import json
+import requests
+import urllib.parse
+from lxml import html
 from datetime import date, timedelta
 
 
@@ -29,9 +33,9 @@ class OttplayLatestSpider(scrapy.Spider):
     ]
 
     # ======================
-    # CUSTOM HEADERS
+    # HEADERS
     # ======================
-    custom_headers = {
+    api_headers = {
         "accept": "application/json",
         "apiversion": "1",
         "platform": "web",
@@ -39,27 +43,93 @@ class OttplayLatestSpider(scrapy.Spider):
         "user-agent": "Mozilla/5.0"
     }
 
+    search_headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    OTT_PRIORITY = [
+        "hotstar.com",
+        "zee5.com",
+        "sonyliv.com",
+        "primevideo.com",
+        "lionsgateplay.com",
+        "aha.video",
+        "tataplaybinge.com",
+        "airtelxstream.in"
+    ]
+
     def start_requests(self):
         for url in self.start_urls:
             yield scrapy.Request(
                 url=url,
-                headers=self.custom_headers,
+                headers=self.api_headers,
                 callback=self.parse
             )
 
+    # ======================
+    # DUCKDUCKGO HELPERS
+    # ======================
+    def extract_uddg_url(self, link):
+        if "uddg=" not in link:
+            return None
+
+        parsed = urllib.parse.urlparse(link)
+        qs = urllib.parse.parse_qs(parsed.query)
+        uddg = qs.get("uddg", [None])[0]
+
+        if not uddg:
+            return None
+
+        return urllib.parse.unquote(uddg)
+
+    def get_best_ott_link(self, item):
+        release_date = date.fromisoformat(item["ott_release_date"])
+
+        # Only today or past dates
+        if release_date > date.today():
+            return None
+
+        query = f'{item["title"]} {item["language"]} {item["ott_platform"]} OTT movie'
+
+        r = requests.get(
+            "https://duckduckgo.com/html/",
+            params={"q": query},
+            headers=self.search_headers,
+            timeout=15
+        )
+
+        tree = html.fromstring(r.text)
+        raw_links = tree.xpath("//a[contains(@class,'result__a')]/@href")
+
+        decoded_links = []
+
+        for link in raw_links:
+            decoded = self.extract_uddg_url(link)
+            if decoded:
+                decoded_links.append(decoded)
+
+        # Priority-based selection
+        for domain in self.OTT_PRIORITY:
+            for url in decoded_links:
+                if domain in url:
+                    return url
+
+        return decoded_links[0] if decoded_links else None
+
+    # ======================
+    # PARSER
+    # ======================
     def parse(self, response):
         data = json.loads(response.text)
-
         seen = set()
 
         for movie in data.get("result", []):
             title = movie.get("display_name") or movie.get("name")
             ottplay_id = movie.get("ottplay_id")
-            poster = movie.get("posters", [None])[0]
 
             language = movie.get("primary_language", {}).get("logo_text")
 
-            # ❌ Skip English
+            # Skip English
             if language in ("English", "E"):
                 continue
 
@@ -70,7 +140,6 @@ class OttplayLatestSpider(scrapy.Spider):
 
                 release_date = date.fromisoformat(available_from[:10])
 
-                # ✅ STRICT DATE WINDOW
                 if not (self.FROM_DATE <= release_date <= self.TO_DATE):
                     continue
 
@@ -82,10 +151,14 @@ class OttplayLatestSpider(scrapy.Spider):
 
                 seen.add(unique_key)
 
-                yield {
+                item = {
                     "title": title,
                     "language": language,
                     "ott_platform": provider,
                     "ott_release_date": release_date.isoformat(),
-                    
                 }
+
+                # 🔍 OTT PAGE SEARCH
+                item["ott_link"] = self.get_best_ott_link(item)
+
+                yield item
