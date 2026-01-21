@@ -1,4 +1,4 @@
-import scrapy
+import scrapy,json
 from datetime import date, timedelta
 
 
@@ -48,7 +48,7 @@ class OttplayLatestSpider(scrapy.Spider):
             )
 
     def parse(self, response):
-        data = response.json()
+        data = json.loads(response.text)
 
         seen = set()
 
